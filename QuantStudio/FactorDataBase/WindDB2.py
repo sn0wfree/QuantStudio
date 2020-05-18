@@ -16,7 +16,7 @@ from QuantStudio.Tools.FileFun import getShelveFileSuffix
 from QuantStudio.Tools.QSObjects import QSSQLObject
 from QuantStudio import __QS_Object__, __QS_Error__, __QS_LibPath__, __QS_MainPath__, __QS_ConfigPath__
 from QuantStudio.FactorDataBase.FactorDB import FactorDB, FactorTable
-from QuantStudio.FactorDataBase.FDBFun import updateInfo, adjustDateTime
+from QuantStudio.FactorDataBase.FDBFun import updateInfo, adjustDateTime, adjustDataDTID
 
 def RollBackNPeriod(report_date, n_period):
     Date = report_date
@@ -92,7 +92,7 @@ def _DefaultOperator(f, idt, iid, x, args):
     return np.nan
 
 class _DBTable(FactorTable):
-    def getMetaData(self, key=None):
+    def getMetaData(self, key=None, args={}):
         TableInfo = self._FactorDB._TableInfo.loc[self.Name]
         if key is None:
             return TableInfo
@@ -102,7 +102,7 @@ class _DBTable(FactorTable):
     def FactorNames(self):
         FactorInfo = self._FactorDB._FactorInfo.loc[self.Name]
         return FactorInfo[FactorInfo["FieldType"]=="因子"].index.tolist()
-    def getFactorMetaData(self, factor_names=None, key=None):
+    def getFactorMetaData(self, factor_names=None, key=None, args={}):
         if factor_names is None:
             factor_names = self.FactorNames
         FactorInfo = self._FactorDB._FactorInfo.loc[self.Name]
@@ -116,8 +116,8 @@ class _DBTable(FactorTable):
             return MetaData
         elif key=="Description": return FactorInfo["Description"].loc[factor_names]
         elif key is None:
-            return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType"),
-                                 "Description":self.getFactorMetaData(factor_names, key="Description")})
+            return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType", args=args),
+                                 "Description":self.getFactorMetaData(factor_names, key="Description", args=args)})
         else:
             return pd.Series([None]*len(factor_names), index=factor_names, dtype=np.dtype("O"))
 
@@ -133,14 +133,14 @@ class _CalendarTable(_DBTable):
     @property
     def FactorNames(self):
         return ["交易日"]
-    def getFactorMetaData(self, factor_names=None, key=None):
+    def getFactorMetaData(self, factor_names=None, key=None, args={}):
         if factor_names is None: factor_names = self.FactorNames
         if key=="DataType":
             return self._DataType.loc[factor_names]
         elif key=="Description": return pd.Series(["0 or nan: 非交易日; 1: 交易日"]*len(factor_names), index=factor_names)
         elif key is None:
-            return pd.DataFrame({"DataType": self.getFactorMetaData(factor_names, key="DataType"),
-                                 "Description": self.getFactorMetaData(factor_names, key="Description")})
+            return pd.DataFrame({"DataType": self.getFactorMetaData(factor_names, key="DataType", args=args),
+                                 "Description": self.getFactorMetaData(factor_names, key="Description", args=args)})
         else:
             return pd.Series([None]*len(factor_names), index=factor_names, dtype=np.dtype("O"))
     # 返回给定时点 idt 有交易的交易所列表
@@ -195,7 +195,10 @@ class _CalendarTable(_DBTable):
 class _MarketTable(_DBTable):
     """行情因子表"""
     LookBack = Int(0, arg_type="Integer", label="回溯天数", order=0)
-    #DateField = Enum(None, arg_type="SingleOption", label="日期字段", order=1)
+    OnlyStartLookBack = Bool(False, label="只起始日回溯", arg_type="Bool", order=1)
+    OnlyLookBackNontarget = Bool(False, label="只回溯非目标日", arg_type="Bool", order=2)
+    OnlyLookBackDT = Bool(False, label="只回溯时点", arg_type="Bool", order=3)
+    #DateField = Enum(None, arg_type="SingleOption", label="日期字段", order=4)
     def __init__(self, name, fdb, sys_args={}, **kwargs):
         FactorInfo = fdb._FactorInfo.loc[name]
         self._IDField = FactorInfo[FactorInfo["FieldType"]=="ID"].index[0]
@@ -210,7 +213,7 @@ class _MarketTable(_DBTable):
     def __QS_initArgs__(self):
         super().__QS_initArgs__()
         FactorInfo = self._FactorDB._FactorInfo.loc[self.Name]
-        self.add_trait("DateField", Enum(*self._DateFields, arg_type="SingleOption", label="日期字段", order=1))
+        self.add_trait("DateField", Enum(*self._DateFields, arg_type="SingleOption", label="日期字段", order=4))
         iFactorInfo = FactorInfo[(FactorInfo["FieldType"]=="Date") & pd.notnull(FactorInfo["Supplementary"])]
         iFactorInfo = iFactorInfo[iFactorInfo["Supplementary"].str.contains("DefaultDate")]
         if iFactorInfo.shape[0]>0: self.DateField = iFactorInfo.index[0]
@@ -275,7 +278,7 @@ class _MarketTable(_DBTable):
     def __QS_genGroupInfo__(self, factors, operation_mode):
         DateConditionGroup = {}
         for iFactor in factors:
-            iDateConditions = (iFactor.DateField, ";".join([iArgName+":"+iFactor[iArgName] for iArgName in iFactor.ArgNames if iArgName!="回溯天数"]))
+            iDateConditions = (iFactor.DateField, ";".join([iArgName+":"+iFactor[iArgName] for iArgName in iFactor.ArgNames if iArgName not in ("回溯天数", "只起始日回溯", "只回溯非目标日", "只回溯时点")]))
             if iDateConditions not in DateConditionGroup:
                 DateConditionGroup[iDateConditions] = {"FactorNames":[iFactor.Name], 
                                                        "RawFactorNames":{iFactor._NameInFT}, 
@@ -329,7 +332,7 @@ class _MarketTable(_DBTable):
     def __QS_calcData__(self, raw_data, factor_names, ids, dts, args={}):
         if raw_data.shape[0]==0: return pd.Panel(items=factor_names, major_axis=dts, minor_axis=ids)
         raw_data = raw_data.set_index(["日期", "ID"])
-        DataType = self.getFactorMetaData(factor_names=factor_names, key="DataType")
+        DataType = self.getFactorMetaData(factor_names=factor_names, key="DataType", args=args)
         Data = {}
         for iFactorName in raw_data.columns:
             iRawData = raw_data[iFactorName].unstack()
@@ -338,13 +341,10 @@ class _MarketTable(_DBTable):
         Data = pd.Panel(Data).loc[factor_names]
         Data.major_axis = [dt.datetime.strptime(iDate, "%Y%m%d") for iDate in Data.major_axis]
         LookBack = args.get("回溯天数", self.LookBack)
-        if LookBack==0: return Data.loc[:, dts, ids]
-        AllDTs = Data.major_axis.union(dts).sort_values()
-        Data = Data.loc[:, AllDTs, ids]
-        Limits = LookBack*24.0*3600
-        for i, iFactorName in enumerate(Data.items):
-            Data.iloc[i] = fillNaByLookback(Data.iloc[i], lookback=Limits)
-        return Data.loc[:, dts]
+        return adjustDataDTID(Data, LookBack, factor_names, ids, dts, 
+                              args.get("只起始日回溯", self.OnlyStartLookBack), 
+                              args.get("只回溯非目标日", self.OnlyLookBackNontarget), 
+                              args.get("只回溯时点", self.OnlyLookBackDT), logger=self._QS_Logger)
 
 class _DividendTable(_DBTable):
     """分红因子表"""
@@ -507,15 +507,15 @@ class _ConstituentTable(_DBTable):
             SQLStr += "ORDER BY "+DBTableName+"."+FieldDict[self._GroupField]
             self._IndexIDs = [iRslt[0] for iRslt in self._FactorDB.fetchall(SQLStr)]
         return self._IndexIDs
-    def getFactorMetaData(self, factor_names=None, key=None):
+    def getFactorMetaData(self, factor_names=None, key=None, args={}):
         if factor_names is None: factor_names = self.FactorNames
         FactorInfo = self._FactorDB._FactorInfo.loc[self.Name]
         if key=="DataType":
             return pd.Series("double", index=factor_names)
         elif key=="Description": return pd.Series(["0 or nan: 非成分; 1: 是成分"]*len(factor_names), index=factor_names)
         elif key is None:
-            return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType"),
-                                 "Description":self.getFactorMetaData(factor_names, key="Description")})
+            return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType", args=args),
+                                 "Description":self.getFactorMetaData(factor_names, key="Description", args=args)})
         else:
             return pd.Series([None]*len(factor_names), index=factor_names, dtype=np.dtype("O"))
     # 返回指数 ID 为 ifactor_name 在给定时点 idt 的所有成份股
@@ -708,6 +708,8 @@ class _IndustryTable(_DBTable):
         self._IDField = FactorInfo[FactorInfo["FieldType"]=="ID"].index[0]
         self._InDateField = FactorInfo[FactorInfo["FieldType"]=="InDate"].index[0]
         self._OutDateField = FactorInfo[FactorInfo["FieldType"]=="OutDate"].index[0]
+        self._OutDateIncluded = FactorInfo[FactorInfo["FieldType"]=="OutDate"]["Supplementary"].iloc[0]
+        self._OutDateIncluded = (pd.isnull(self._OutDateIncluded) or (self._OutDateIncluded=="包含"))
         if fdb.DBType=="Oracle": self._SubStrFun = 'SUBSTR'
         else: self._SubStrFun = 'SUBSTRING'
         self._DataType = pd.Series("string", index=["行业名称", "行业代码"])
@@ -715,11 +717,11 @@ class _IndustryTable(_DBTable):
     @property
     def FactorNames(self):
         return ["行业名称", "行业代码"]
-    def getFactorMetaData(self, factor_names=None, key=None):
+    def getFactorMetaData(self, factor_names=None, key=None, args={}):
         if factor_names is None: factor_names = self.FactorNames
         FactorInfo = self._FactorDB._FactorInfo.loc[self.Name]
         if key=="DataType": return self._DataType.loc[factor_names]
-        elif key is None: return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType")})
+        elif key is None: return pd.DataFrame({"DataType":self.getFactorMetaData(factor_names, key="DataType", args=args)})
         else: return pd.Series([None]*len(factor_names), index=factor_names, dtype=np.dtype("O"))
     # 返回在给定时点 idt 的有行业分类的证券
     # 如果 idt 为 None, 将返回所有曾经有行业分类的证券
@@ -837,7 +839,7 @@ class _IndustryTable(_DBTable):
         if raw_data.shape[0]==0: return pd.Panel(np.full(shape=(len(factor_names), len(dts), len(ids)), fill_value=None, dtype="O"), items=factor_names, major_axis=dts, minor_axis=ids)
         raw_data[self._OutDateField] = raw_data[self._OutDateField].where(pd.notnull(raw_data[self._OutDateField]), dt.date.today().strftime("%Y%m%d"))
         raw_data.set_index(["ID"], inplace=True)
-        DeltaDT = dt.timedelta(1)
+        DeltaDT = dt.timedelta(int(not self._OutDateIncluded))
         Data, nFactor = {}, len(factor_names)
         for iID in raw_data.index.unique():
             iRawData = raw_data.loc[[iID]]
@@ -1074,7 +1076,7 @@ class _FinancialTable(_DBTable):
                 NewData[iFactorName] = Data.iloc[i].astype("float")
             else:
                 NewData[iFactorName] = Data.iloc[i]
-        Data = adjustDateTime(pd.Panel(NewData).loc[factor_names], dts, fillna=True, method="pad")
+        Data = adjustDateTime(pd.Panel(NewData).loc[factor_names], dts, fillna=False)
         Data = Data.loc[:, :, ids]
         return Data
     # 检索最大报告期的位置

@@ -9,8 +9,7 @@ import numpy as np
 import pandas as pd
 from traits.api import ListStr, Enum, List, Int, Float, Str, Instance, Dict, on_trait_change
 from traitsui.api import Item, Group, View
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from QuantStudio import __QS_Error__, __QS_Object__
@@ -28,7 +27,7 @@ def cutDateTime(df, dts=None, start_dt=None, end_dt=None):
     if start_dt is not None: df = df[df.index>=start_dt]
     if end_dt is not None: df = df[df.index<=end_dt]
     return df
-def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, debt_record, date_index):
+def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, cash_record, debt_record, date_index):
     Output = {}
     # 以时间点为索引的序列
     Output["时间序列"] = pd.DataFrame(cash_series, columns=["现金"])
@@ -37,6 +36,9 @@ def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, 
     Output["时间序列"]["账户价值"] = account_value_series
     AccountEarnings = account_value_series.diff()
     AccountEarnings.iloc[0] = account_value_series.iloc[0] - init_cash
+    # 现金流调整
+    CashDelta = cash_record.loc[:, ["时间点", "现金流"]].groupby(by=["时间点"]).sum()["现金流"]
+    AccountEarnings[CashDelta.index] -= CashDelta
     Output["时间序列"]["收益"] = AccountEarnings
     PreAccountValue = np.r_[init_cash, account_value_series.values[:-1]]
     AccountReturn = AccountEarnings / np.abs(PreAccountValue)
@@ -45,7 +47,8 @@ def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, 
     AccountReturn[np.isinf(AccountReturn)] = np.nan
     Output["时间序列"]["累计收益率"] = AccountReturn.cumsum()
     Output["时间序列"]["净值"] = (AccountReturn + 1).cumprod()
-    DebtDelta = debt_record.groupby(by=["时间点"]).sum()["融资"]
+    # 负债调整
+    DebtDelta = debt_record.loc[:, ["时间点", "融资"]].groupby(by=["时间点"]).sum()["融资"]
     PreUnleveredValue = pd.Series(np.r_[init_cash, (account_value_series.values + debt_series.values)[:-1]], index=AccountEarnings.index)
     PreUnleveredValue[DebtDelta.index] += DebtDelta.clip(0, np.inf)
     UnleveredReturn = AccountEarnings / np.abs(PreUnleveredValue)
@@ -65,9 +68,14 @@ def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, 
         DebtSeries = Output["日期序列"]["负债"]
         AccountEarnings = AccountValueSeries.diff()
         AccountEarnings.iloc[0] = AccountValueSeries.iloc[0]-init_cash
+        # 现金流调整
+        cash_record = cash_record.copy()
+        cash_record["时间点"]= [iDateTime.date() for iDateTime in cash_record["时间点"]]
+        CashDelta = cash_record.loc[:, ["时间点", "现金流"]].groupby(by=["时间点"]).sum()["现金流"]
+        AccountEarnings[CashDelta.index] -= CashDelta
         Output["日期序列"]["收益"] = AccountEarnings
         PreAccountValue = np.append(np.array(init_cash), AccountValueSeries.values[:-1])
-        AccountReturn = AccountEarnings/np.abs(PreAccountValue)
+        AccountReturn = AccountEarnings / np.abs(PreAccountValue)
         AccountReturn[AccountEarnings==0] = 0.0
         Output["日期序列"]["收益率"] = AccountReturn
         AccountReturn[np.isinf(AccountReturn)] = np.nan
@@ -75,10 +83,10 @@ def genAccountOutput(init_cash, cash_series, debt_series, account_value_series, 
         Output["日期序列"]["净值"] = (AccountReturn+1).cumprod()
         debt_record = debt_record.copy()
         debt_record["时间点"] = [iDateTime.date() for iDateTime in debt_record["时间点"]]
-        DebtDelta = debt_record.groupby(by=["时间点"]).sum()["融资"]
+        DebtDelta = debt_record.loc[:, ["时间点", "融资"]].groupby(by=["时间点"]).sum()["融资"]
         PreUnleveredValue = pd.Series(np.append(np.array(init_cash), (AccountValueSeries.values+DebtSeries.values)[:-1]), index=AccountEarnings.index)
         PreUnleveredValue[DebtDelta.index] += DebtDelta.clip(0, np.inf)
-        UnleveredReturn = AccountEarnings/np.abs(PreUnleveredValue)
+        UnleveredReturn = AccountEarnings / np.abs(PreUnleveredValue)
         UnleveredReturn[AccountEarnings==0] = 0.0
         Output["日期序列"]["无杠杆收益率"] = UnleveredReturn
         UnleveredReturn[np.isinf(UnleveredReturn)] = np.nan
@@ -128,7 +136,7 @@ class Account(BaseModule):
         CashSeries = self.getCashSeries()
         DebtSeries = self.getDebtSeries()
         AccountValueSeries = self.getAccountValueSeries()
-        self._Output = genAccountOutput(self.InitCash, CashSeries, DebtSeries, AccountValueSeries, self._DebtRecord, self._Model.DateIndexSeries)
+        self._Output = genAccountOutput(self.InitCash, CashSeries, DebtSeries, AccountValueSeries, self._CashRecord, self._DebtRecord, self._Model.DateIndexSeries)
         self._Output["现金流记录"] = self._CashRecord
         self._Output["融资记录"] = self._DebtRecord
         self._Output["交易记录"] = self._TradingRecord
@@ -299,14 +307,15 @@ class Strategy(BaseModule):
         for i, iAccount in enumerate(self.Accounts):
             iOutput = iAccount.output(recalculate=True)
             if iOutput: self._Output[str(i)+"-"+iAccount.Name] = iOutput
-        AccountValueSeries, CashSeries, DebtSeries, InitCash, DebtRecord = 0, 0, 0, 0, None
+        AccountValueSeries, CashSeries, DebtSeries, InitCash, DebtRecord, CashRecord = 0, 0, 0, 0, None, None
         for iAccount in self.Accounts:
             AccountValueSeries += iAccount.getAccountValueSeries()
             CashSeries += iAccount.getCashSeries()
             DebtSeries += iAccount.getDebtSeries()
             InitCash += iAccount.InitCash
             DebtRecord = iAccount.DebtRecord.append(DebtRecord)
-        StrategyOutput = genAccountOutput(InitCash, CashSeries, DebtSeries, AccountValueSeries, DebtRecord, self._Model.DateIndexSeries)
+            CashRecord = iAccount.CashRecord.append(CashRecord)
+        StrategyOutput = genAccountOutput(InitCash, CashSeries, DebtSeries, AccountValueSeries, CashRecord, DebtRecord, self._Model.DateIndexSeries)
         StrategyOutput["统计数据"].columns = ["策略表现", "无杠杆表现"]
         if self.Benchmark.FactorTable is not None:# 设置了基准
             BenchmarkPrice = self.Benchmark.FactorTable.readData(factor_names=[self.Benchmark.PriceFactor], dts=AccountValueSeries.index.tolist(), ids=[self.Benchmark.BenchmarkID]).iloc[0,:,0]
@@ -338,7 +347,7 @@ class Strategy(BaseModule):
     def _formatStatistics(self):
         Stats = self._Output["Strategy"]["统计数据"]
         FormattedStats = pd.DataFrame(index=Stats.index, columns=Stats.columns, dtype="O")
-        DateFormatFun = np.vectorize(lambda x: x.strftime("%Y-%m-%d") if x is not None else "-")
+        DateFormatFun = np.vectorize(lambda x: x.strftime("%Y-%m-%d") if pd.notnull(x) else "NaT")
         IntFormatFun = np.vectorize(lambda x: ("%d" % (x, )))
         FloatFormatFun = np.vectorize(lambda x: ("%.2f" % (x, )))
         PercentageFormatFun = np.vectorize(lambda x: ("%.2f%%" % (x*100, )))
@@ -354,38 +363,37 @@ class Strategy(BaseModule):
         hasBenchmark = ("基准" in StrategyOutput["统计数据"])
         if hasBenchmark: nRow, nCol = 1, 3
         else: nRow, nCol = 1, 2
-        Fig = plt.figure(figsize=(min(32, 16+(nCol-1)*8), 8*nRow))
-        AxesGrid = gridspec.GridSpec(nRow, nCol)
+        Fig = Figure(figsize=(min(32, 16+(nCol-1)*8), 8*nRow))
         xData = np.arange(0, StrategyOutput["日期序列"].shape[0])
         xTicks = np.arange(0, StrategyOutput["日期序列"].shape[0], int(StrategyOutput["日期序列"].shape[0]/10))
         xTickLabels = [StrategyOutput["日期序列"].index[i].strftime("%Y-%m-%d") for i in xTicks]
         yMajorFormatter = FuncFormatter(_QS_formatMatplotlibPercentage)
-        iAxes = plt.subplot(AxesGrid[0, 0])
-        iAxes.plot(xData, StrategyOutput["日期序列"]["账户价值"].values, label="账户价值", color="r", alpha=0.6, lw=3)
+        iAxes = Fig.add_subplot(nRow, nCol, 1)
+        iAxes.plot(xData, StrategyOutput["日期序列"]["账户价值"].values, label="账户价值", color="indianred", lw=2.5)
         iRAxes = iAxes.twinx()
-        iRAxes.bar(xData, StrategyOutput["日期序列"]["收益"].values, label="账户收益", color="b")
+        iRAxes.bar(xData, StrategyOutput["日期序列"]["收益"].values, label="账户收益", color="steelblue")
         iRAxes.legend(loc="upper right")
         iAxes.set_xticks(xTicks)
         iAxes.set_xticklabels(xTickLabels)
         iAxes.legend(loc='upper left')
         iAxes.set_title("策略表现")
-        iAxes = plt.subplot(AxesGrid[0, 1])
-        iAxes.plot(xData, StrategyOutput["日期序列"]["无杠杆净值"].values, label="无杠杆净值", color="r", alpha=0.6, lw=3)
-        if hasBenchmark: iAxes.plot(xData, StrategyOutput["日期序列"]["基准净值"].values, label="基准净值", color="g", alpha=0.6, lw=3)
+        iAxes = Fig.add_subplot(nRow, nCol, 2)
+        iAxes.plot(xData, StrategyOutput["日期序列"]["无杠杆净值"].values, label="无杠杆净值", color="indianred", lw=2.5)
+        if hasBenchmark: iAxes.plot(xData, StrategyOutput["日期序列"]["基准净值"].values, label="基准净值", color="forestgreen", lw=2.5)
         iRAxes = iAxes.twinx()
         iRAxes.yaxis.set_major_formatter(yMajorFormatter)
-        iRAxes.bar(xData, StrategyOutput["日期序列"]["无杠杆收益率"].values, label="无杠杆收益率", color="b")
+        iRAxes.bar(xData, StrategyOutput["日期序列"]["无杠杆收益率"].values, label="无杠杆收益率", color="steelblue")
         iRAxes.legend(loc="upper right")
         iAxes.set_xticks(xTicks)
         iAxes.set_xticklabels(xTickLabels)
         iAxes.legend(loc='upper left')
         iAxes.set_title("策略无杠杆表现")
         if hasBenchmark:
-            iAxes = plt.subplot(AxesGrid[0, 2])
-            iAxes.plot(xData, StrategyOutput["日期序列"]["相对净值"].values, label="相对净值", color="r", alpha=0.6, lw=3)
+            iAxes = Fig.add_subplot(nRow, nCol, 3)
+            iAxes.plot(xData, StrategyOutput["日期序列"]["相对净值"].values, label="相对净值", color="indianred", lw=2.5)
             iRAxes = iAxes.twinx()
             iRAxes.yaxis.set_major_formatter(yMajorFormatter)
-            iRAxes.bar(xData, StrategyOutput["日期序列"]["相对收益率"].values, label="相对收益率", color="b")
+            iRAxes.bar(xData, StrategyOutput["日期序列"]["相对收益率"].values, label="相对收益率", color="steelblue")
             iRAxes.legend(loc="upper right")
             iAxes.set_xticks(xTicks)
             iAxes.set_xticklabels(xTickLabels)
@@ -400,7 +408,7 @@ class Strategy(BaseModule):
         Fig = self.genMatplotlibFig()
         # figure 保存为二进制文件
         Buffer = BytesIO()
-        plt.savefig(Buffer)
+        Fig.savefig(Buffer)
         PlotData = Buffer.getvalue()
         # 图像数据转化为 HTML 格式
         ImgStr = "data:image/png;base64,"+base64.b64encode(PlotData).decode()

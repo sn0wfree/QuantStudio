@@ -8,8 +8,7 @@ import pandas as pd
 import statsmodels.api as sm
 from traits.api import ListStr, Enum, List, ListInt, Int, Str, Dict
 from traitsui.api import SetEditor, Item
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 import matplotlib.dates as mdate
 
@@ -23,7 +22,7 @@ class FamaMacBethRegression(BaseModule):
     """Fama-MacBeth 回归"""
     TestFactors = ListStr(arg_type="MultiOption", label="测试因子", order=0, option_range=())
     #PriceFactor = Enum(None, arg_type="SingleOption", label="价格因子", order=1)
-    #IndustryFactor = Enum("无", arg_type="SingleOption", label="行业因子", order=2)
+    #ClassFactor = Enum("无", arg_type="SingleOption", label="类别因子", order=2)
     CalcDTs = List(dt.datetime, arg_type="DateList", label="计算时点", order=3)
     IDFilter = Str(arg_type="IDFilter", label="筛选条件", order=4)
     RollAvgPeriod = Int(12, arg_type="Integer", label="滚动平均期数", order=5)
@@ -36,7 +35,7 @@ class FamaMacBethRegression(BaseModule):
         self.TestFactors.append(DefaultNumFactorList[0])
         self.add_trait("PriceFactor", Enum(*DefaultNumFactorList, arg_type="SingleOption", label="价格因子", order=1))
         self.PriceFactor = searchNameInStrList(DefaultNumFactorList, ['价','Price','price'])
-        self.add_trait("IndustryFactor", Enum(*(["无"]+DefaultStrFactorList), arg_type="SingleOption", label="行业因子", order=2))
+        self.add_trait("ClassFactor", Enum(*(["无"]+DefaultStrFactorList), arg_type="SingleOption", label="类别因子", order=2))
     def getViewItems(self, context_name=""):
         Items, Context = super().getViewItems(context_name=context_name)
         Items[0].editor = SetEditor(values=self.trait("TestFactors").option_range)
@@ -74,15 +73,15 @@ class FamaMacBethRegression(BaseModule):
         Price = self._FactorTable.readData(dts=[LastDateTime, idt], ids=LastIDs, factor_names=[self.PriceFactor]).iloc[0]
         Ret = Price.iloc[1] / Price.iloc[0] - 1
         # 展开Dummy因子
-        if self.IndustryFactor!="无":
-            DummyFactorData = self._FactorTable.readData(dts=[LastDateTime], ids=LastIDs, factor_names=[self.IndustryFactor]).iloc[0,0,:]
+        if self.ClassFactor!="无":
+            DummyFactorData = self._FactorTable.readData(dts=[LastDateTime], ids=LastIDs, factor_names=[self.ClassFactor]).iloc[0,0,:]
             Mask = pd.notnull(DummyFactorData)
             DummyFactorData = DummyVarTo01Var(DummyFactorData[Mask], ignore_na=True)
             FactorData = pd.merge(FactorData.loc[Mask], DummyFactorData, left_index=True, right_index=True)
         # 回归
         yData = Ret[FactorData.index].values
         xData = FactorData.values
-        if self.IndustryFactor=="无":
+        if self.ClassFactor=="无":
             xData = sm.add_constant(xData, prepend=False)
             LastInds = [nFactor]
         else:
@@ -156,16 +155,16 @@ class FamaMacBethRegression(BaseModule):
         return 0
     def _plotStatistics(self, axes, x_data, x_ticklabels, left_data, left_formatter, right_data=None, right_formatter=None, right_axes=True):
         axes.yaxis.set_major_formatter(left_formatter)
-        axes.bar(x_data, left_data.values, label=left_data.name, color="b")
+        axes.bar(x_data, left_data.values, label=left_data.name, color="steelblue")
         if right_data is not None:
             if right_axes:
                 axes.legend(loc='upper left')
                 right_axes = axes.twinx()
                 right_axes.yaxis.set_major_formatter(right_formatter)
-                right_axes.plot(x_data, right_data.values, label=right_data.name, color="r", alpha=0.6, lw=3)
+                right_axes.plot(x_data, right_data.values, label=right_data.name, color="indianred", lw=2.5)
                 right_axes.legend(loc="upper right")
             else:
-                axes.plot(x_data, right_data.values, label=right_data.name, color="r", alpha=0.6, lw=3)
+                axes.plot(x_data, right_data.values, label=right_data.name, color="indianred", lw=2.5)
                 axes.legend(loc='best')
         else:
             axes.legend(loc='best')
@@ -174,38 +173,37 @@ class FamaMacBethRegression(BaseModule):
         return axes
     def genMatplotlibFig(self, file_path=None):
         nRow, nCol = 1, 3
-        Fig = plt.figure(figsize=(min(32, 16+(nCol-1)*8), 8*nRow))
-        AxesGrid = gridspec.GridSpec(nRow, nCol)
+        Fig = Figure(figsize=(min(32, 16+(nCol-1)*8), 8*nRow))
         PercentageFormatter = FuncFormatter(_QS_formatMatplotlibPercentage)
         FloatFormatter = FuncFormatter(lambda x, pos: '%.2f' % (x, ))
         xData = np.arange(0, self._Output["统计数据"].shape[0])
         xTickLabels = [str(iInd) for iInd in self._Output["统计数据"].index]
-        iAxes = plt.subplot(AxesGrid[0, 0])
+        iAxes = Fig.add_subplot(nRow, nCol, 1)
         iAxes.yaxis.set_major_formatter(PercentageFormatter)
-        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Raw)"].values, width=-0.25, align="edge", color="r", label="年化收益率(Raw)")
-        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Pure)"].values, width=0.25, align="edge", color="b", label="年化收益率(Pure)")
+        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Raw)"].values, width=-0.25, align="edge", color="indianred", label="年化收益率(Raw)")
+        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Pure)"].values, width=0.25, align="edge", color="steelblue", label="年化收益率(Pure)")
         iAxes.set_xticks(xData)
         iAxes.set_xticklabels(xTickLabels)
         iAxes.legend(loc='best')
         iAxes.set_title("年化收益率")
-        iAxes = plt.subplot(AxesGrid[0, 1])
+        iAxes = Fig.add_subplot(nRow, nCol, 2)
         iAxes.yaxis.set_major_formatter(FloatFormatter)
-        iAxes.bar(xData, self._Output["统计数据"]["t统计量(Raw)"].values, width=-0.25, align="edge", color="r", label="t统计量(Raw)")
-        iAxes.bar(xData, self._Output["统计数据"]["t统计量(Pure)"].values, width=0.25, align="edge", color="b", label="t统计量(Pure)")
+        iAxes.bar(xData, self._Output["统计数据"]["t统计量(Raw)"].values, width=-0.25, align="edge", color="indianred", label="t统计量(Raw)")
+        iAxes.bar(xData, self._Output["统计数据"]["t统计量(Pure)"].values, width=0.25, align="edge", color="steelblue", label="t统计量(Pure)")
         iAxes.set_xticks(xData)
         iAxes.set_xticklabels(xTickLabels)
         iAxes.legend(loc='best')
         iAxes.set_title("t统计量")
-        iAxes = plt.subplot(AxesGrid[0, 2])
+        iAxes = Fig.add_subplot(nRow, nCol, 3)
         iAxes.yaxis.set_major_formatter(PercentageFormatter)
-        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Pure-Naive)"].values, color="r", label="年化收益率(Pure-Naive)")
+        iAxes.bar(xData, self._Output["统计数据"]["年化收益率(Pure-Naive)"].values, color="steelblue", label="年化收益率(Pure-Naive)")
         iAxes.set_xticks(xData)
         iAxes.set_xticklabels(xTickLabels)
         iAxes.legend(loc='upper left')
         iAxes.set_title("Pure-Naive")
         RAxes = iAxes.twinx()
         RAxes.yaxis.set_major_formatter(FloatFormatter)
-        RAxes.plot(xData, self._Output["统计数据"]["t统计量(Pure-Naive)"].values, color="b", alpha=0.6, lw=3, label="t统计量(Pure-Naive)")
+        RAxes.plot(xData, self._Output["统计数据"]["t统计量(Pure-Naive)"].values, color="indianred", lw=2.5, label="t统计量(Pure-Naive)")
         RAxes.legend(loc='upper right')
         if file_path is not None: Fig.savefig(file_path, dpi=150, bbox_inches='tight')
         return Fig
@@ -237,7 +235,7 @@ class FamaMacBethRegression(BaseModule):
         Fig = self.genMatplotlibFig()
         # figure 保存为二进制文件
         Buffer = BytesIO()
-        plt.savefig(Buffer, bbox_inches='tight')
+        Fig.savefig(Buffer, bbox_inches='tight')
         PlotData = Buffer.getvalue()
         # 图像数据转化为 HTML 格式
         ImgStr = "data:image/png;base64,"+base64.b64encode(PlotData).decode()
